@@ -290,3 +290,5 @@ python/bin/
 python/typing_extensions.py
 python/*.dist-info/
 pytest-of-bohanhou/
+
+logs/
