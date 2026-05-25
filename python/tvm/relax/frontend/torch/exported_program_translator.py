@@ -33,7 +33,7 @@ from tvm import relax
 
 from .base_fx_graph_translator import BaseFXGraphImporter
 
-
+# Torch frontend Interpreter
 class ExportedProgramImporter(BaseFXGraphImporter):
     """An importer from ExportedProgram to Relax."""
 
@@ -1963,19 +1963,20 @@ class ExportedProgramImporter(BaseFXGraphImporter):
     def from_exported_program(
         self,
         exported_program: torch.export.ExportedProgram,
-        keep_params_as_input: bool,
-        unwrap_unit_return_tuple: bool,
-        no_bind_return_tuple: bool,
+        keep_params_as_input: bool,         # false
+        unwrap_unit_return_tuple: bool,     # false
+        no_bind_return_tuple: bool,         # false
         custom_convert_map: dict[str, Callable[[fx.Node, BaseFXGraphImporter], relax.Var]] | None,
     ) -> tvm.IRModule:
         """Convert a PyTorch ExportedProgram to a Relax program."""
-
+        print("[Zazzle] custom_convert_map before update: ", custom_convert_map)      # None
         # Update the conversion map with custom ops if provided.
         if custom_convert_map:
             custom_ops = set(custom_convert_map.keys())
             self.update_convert_map(custom_convert_map)
         else:
             custom_ops = set()
+        print("[Zazzle] custom_convert_map after update: ", custom_convert_map)       # None
 
         # Create input variables.
         (
@@ -2081,6 +2082,7 @@ def from_exported_program(
     ) = None,
     run_ep_decomposition: bool = True,
 ) -> tvm.IRModule:
+    print("[Zazzle] exported_program: ", exported_program, "\nEnd")
     """Convert a PyTorch ExportedProgram to a Relax program
 
     Parameters

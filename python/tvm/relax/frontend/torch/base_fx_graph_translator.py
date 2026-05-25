@@ -48,6 +48,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
 
     ########## Utilities ##########
 
+    # Q: 这个只是被 custom 调用吗   tvm 本身支持的基础算子是在哪里写进去的
     def update_convert_map(self, custom_convert_map: dict[str, Callable]):
         """Update self.convert_map with custom convert map
 
@@ -169,6 +170,8 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
     def retrieve_args(self, node: fx.Node):
         return self._retrieve_args(node.args)
 
+    # Q: 这里处理的是 fx 的参数列表
+    # Q: fx 的参数列表是长什么样的
     def _retrieve_args(self, node):
         from torch import fx
 
@@ -185,6 +188,8 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
         else:
             return node
 
+    # Q: 按理来说  这里在判断的时候应该有个列表  记录了所有支持的 ops (self.convert_map)
+    # Q: 追踪到 self.update 也没看到在哪调用了啊...
     def _check_unsupported_func_type(self, nodes: list[fx.Node]):
         missing_func_types = list(
             {
@@ -197,6 +202,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
 
     ########## Unary Ops ##########
 
+    # Q: 这个的执行逻辑要再仔细看下
     def _unary_op(self, op: Callable) -> Callable:
         from torch import fx
 
@@ -990,6 +996,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
             groups=groups,
         )
 
+    # Q: 不应该只做转换吗   在前端就要处理融合吗
     def _conv2d_impl(
         self,
         x: relax.Expr,

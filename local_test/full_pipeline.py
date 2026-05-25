@@ -20,6 +20,7 @@ This is a fixed-shape prefill-only demo:
 
 import math
 import os
+import sys
 import re
 import time
 from dataclasses import dataclass
@@ -112,6 +113,7 @@ class RMSNorm(nn.Module):
     def forward(self, x):
         # x: [B, T, D]
         variance = (x * x).mean(dim=-1, keepdim=True)
+        # variance = x.pow(2).mean(dim=-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.eps)
         return x * self.weight
 
@@ -255,6 +257,7 @@ def export_to_relax(torch_model, input_ids):
     with torch.no_grad():
         exported = torch.export.export(torch_model, (input_ids,))
 
+    # 1. frontend conveter
     mod = from_exported_program(
         exported,
         keep_params_as_input=True,
@@ -359,7 +362,11 @@ def main():
     print("PyTorch output shape:", torch_out.shape)
 
     # 1) PyTorch -> Relax
+    # python/tvm/relax/frontend/torch/exported_program_translator.py
+    # python/tvm/relax/frontend/torch/base_fx_graph_translator.py
+    # python/tvm/relax/frontend/common.py
     mod, params = export_to_relax(torch_model, input_ids)
+    sys.exit(0)
     dump_mod(
         "STAGE 1: Imported Relax IRModule from PyTorch",
         mod,
@@ -434,3 +441,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Q: TVM Module
+
+# Q: tvm_ffi 是干什么的
