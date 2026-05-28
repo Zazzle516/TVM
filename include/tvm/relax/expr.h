@@ -111,6 +111,7 @@ class StructInfoNode : public ffi::Object {
    * \brief Span that points to the original source code.
    *        Reserved debug information.
    */
+  // 类似 MLIR 中的 loc()
   mutable Span span;
 
   static void RegisterReflection() {
@@ -377,6 +378,7 @@ class VarNode : public LeafExprNode {
   TVM_FFI_DECLARE_OBJECT_INFO("relax.expr.Var", VarNode, LeafExprNode);
 };
 
+// relax.Var
 class Var : public LeafExpr {
  public:
   TVM_DLL explicit Var(ffi::String name_hint, ffi::Optional<StructInfo> struct_info_annotation,

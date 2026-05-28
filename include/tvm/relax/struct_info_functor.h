@@ -64,6 +64,7 @@ class StructInfoFunctor<R(const StructInfo& n, Args...)> {
    * \param args Additional arguments.
    * \return The result of the call
    */
+  // 针对 call operator 的重载
   R operator()(const StructInfo& n, Args... args) {
     return VisitStructInfo(n, std::forward<Args>(args)...);
   }

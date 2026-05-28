@@ -31,6 +31,7 @@
 namespace tvm {
 namespace relax {
 
+// TVM 根据 pattern tag 进行规则驱动的 保守融合
 enum OpPatternKind {
   // Elementwise operation
   kElemWise = 0,

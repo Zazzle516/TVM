@@ -36,10 +36,28 @@
 #include <tvm/runtime/logging.h>
 #include <tvm/tirx/function.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+namespace {
+bool TraceBlockBuilder() {
+  static bool enabled = std::getenv("TVM_TRACE_BLOCK_BUILDER") != nullptr;
+  return enabled;
+}
+
+template <typename T>
+std::string ToDebugString(const T& obj) {
+  std::ostringstream os;
+  os << obj;
+  return os.str();
+}
+}  // namespace
+
 
 // Block builder have three categories of logics that are interdependent with each other.
 //
@@ -169,10 +187,25 @@ class BlockBuilderImpl : public BlockBuilderNode {
     return it->second;
   }
 
-  void BeginDataflowBlock() final { block_stack_.emplace_back(BindingBlockFrame{{}, true}); }
+  void BeginDataflowBlock() final {
+    if (TraceBlockBuilder()) {
+      fprintf(stderr, "[Zazzle] BeginDataflowBlock block_depth=%zu scope_depth=%zu\n",
+            block_stack_.size(), scope_stack_.size());
+      fflush(stderr);
+    }
+    block_stack_.emplace_back(BindingBlockFrame{{}, true});
+  }
 
-  void BeginBindingBlock() final { block_stack_.emplace_back(BindingBlockFrame{{}, false}); }
+  void BeginBindingBlock() final {
+    if (TraceBlockBuilder()) {
+      fprintf(stderr, "[Zazzle] BeginBindingBlock block_depth=%zu scope_depth=%zu\n",
+            block_stack_.size(), scope_stack_.size());
+      fflush(stderr);
+    }
+    block_stack_.emplace_back(BindingBlockFrame{{}, false});
+  }
 
+  // QA: 传入的 params 是哪来的
   void BeginScope(ffi::Optional<ffi::Array<Var>> params) final {
     // The current implementation handles the collection of shape var
     // defined in parameter struct info annotations. The implementation
@@ -180,10 +213,42 @@ class BlockBuilderImpl : public BlockBuilderNode {
     // but can be further improved.
     //
     // TODO(relax-team): Add support for relax Var in struct info annotations.
-
+    if (TraceBlockBuilder()) {
+      fprintf(stderr, "[Zazzle] BeginScope block_depth=%zu scope_depth=%zu\n",
+            block_stack_.size(), scope_stack_.size());
+      fflush(stderr);
+    }
+    // Q: 把当前 block_builder 的 scope 挂到 scope_stack_ 上  Q: 理论上应该只有一个 Scope
     scope_stack_.emplace_back(ScopeFrame());
+
     if (params.defined()) {
-      for (const auto& param : params.value()) {
+      if (TraceBlockBuilder()) {
+        fprintf(stderr, "[Zazzle] BeginScope params.size=%zu\n", params.value().size());
+        fflush(stderr);
+      }
+      for (size_t i = 0; i < params.value().size(); ++i) {
+        const Var& param = params.value()[i];
+        if (TraceBlockBuilder()) {
+          auto param_str = ToDebugString(param);
+          auto sinfo_str = ToDebugString(GetStructInfo(param));
+          fprintf(stderr, "[Zazzle] BeginScope param[%zu]=%s\n", i, param_str.c_str());
+          fprintf(stderr, "[Zazzle] BeginScope param[%zu].struct_info=%s\n", i,
+                  sinfo_str.c_str());
+
+          auto defs = StructInfoVarCollector::Collect(GetStructInfo(param));
+          for (const auto& kv : defs) {
+            auto shape_var = ToDebugString(kv.first);
+            auto shape_expr = ToDebugString(kv.second);
+            fprintf(stderr, "[Zazzle] BeginScope param[%zu] defines shape var %s -> %s\n", i,
+                    shape_var.c_str(), shape_expr.c_str());
+          }
+          fflush(stderr);
+        }
+        // QA: 这里的 params 可以追踪到 python/tvm/relax/frontend/torch/exported_program_translator.py 中 create_input_vars()
+        // 但是在上层 create_input_vars() 的时候还是 relax.Var
+        // 为什么到 relax 处理的时候又变成 tirx::var 了
+        // A: 在 python/tvm/relax/frontend/torch/exported_program_translator.py 中
+        // 先创建 tir::SizeVar -> 放进 relax_shape -> 用 relax_shape 创建 TensorStructInfo -> 用 TensorStructInfo 创建 relax.Var
         AddDefinitionToScope(param);
       }
     }
@@ -202,13 +267,35 @@ class BlockBuilderImpl : public BlockBuilderNode {
       return;
     }
 
+    // shape_var_map: dynamic shape symbols
     auto& shape_var_map = CurrentScopeFrame()->shape_var_map;
+    // Q: 这个 shape_var_map 和 var_map 的区别是什么
 
     // The current implementation handles the collection of shape var
     // defined in parameter struct info annotations. The implementation
     // is correct (since we will simply erase all relax Vars in EraseToWellDefined),
     // but can be further improved.
+    // 通过 Collect 扫描得到的局限于该函数内部的结果   也就是 tirx::var (dynamic shape)
     ffi::Map<tirx::Var, PrimExpr> var_map = StructInfoVarCollector::Collect(GetStructInfo(var));
+    if (TraceBlockBuilder()) {
+      auto var_str = ToDebugString(var);
+      auto sinfo_str = ToDebugString(GetStructInfo(var));
+      fprintf(stderr, "[Zazzle] AddDefinitionToScope var=%s\n", var_str.c_str());
+      fprintf(stderr, "[Zazzle] AddDefinitionToScope var.struct_info=%s\n", sinfo_str.c_str());
+      fprintf(stderr, "[Zazzle] AddDefinitionToScope var_map.size=%zu\n", var_map.size());
+      size_t i = 0;
+      for (const auto& kv : var_map) {
+        auto key_str = ToDebugString(kv.first);
+        auto value_str = ToDebugString(kv.second);
+        fprintf(stderr, "[Zazzle] AddDefinitionToScope var_map[%zu] key=%s value=%s\n", i,
+                key_str.c_str(), value_str.c_str());
+        ++i;
+      }
+      fflush(stderr);
+    }
+
+    // Q: 在构建 shape_var_map 和 var_map 的映射表
+    // 这个 Mapping 是为了把 shape_var_map(dynamic shape symbols) 符号映射到传入的具体的 var_map
     for (const auto& kv : var_map) {
       const tirx::Var& shape_var = kv.first;
       const PrimExpr& shape_expr = kv.second;
@@ -234,6 +321,12 @@ class BlockBuilderImpl : public BlockBuilderNode {
 
   BindingBlock EndBlock() final {
     BindingBlockFrame* cur_frame = CurrentBindingBlockFrame();
+    if (TraceBlockBuilder()) {
+    fprintf(stderr, "[Zazzle] EndBlock kind=%s bindings=%zu block_depth=%zu\n",
+            cur_frame->is_dataflow ? "DataflowBlock" : "BindingBlock",
+            cur_frame->bindings.size(), block_stack_.size());
+    fflush(stderr);
+  }
     BindingBlock ret = cur_frame->is_dataflow ? DataflowBlock(cur_frame->bindings)
                                               : BindingBlock(cur_frame->bindings);
     block_stack_.pop_back();
@@ -243,6 +336,12 @@ class BlockBuilderImpl : public BlockBuilderNode {
   bool CurrentBlockIsDataFlow() final { return CurrentBindingBlockFrame()->is_dataflow; }
 
   Var Emit(Expr expr, ffi::String name_hint) final {
+    if (TraceBlockBuilder()) {
+      auto s = ToDebugString(expr);
+      fprintf(stderr, "[Zazzle] Emit name_hint=%s expr=%s\n",
+              name_hint.c_str(), s.c_str());
+      fflush(stderr);
+    }
     return this->Emit(expr, CurrentBindingBlockFrame()->is_dataflow, name_hint);
   }
 
@@ -472,11 +571,12 @@ class BlockBuilderImpl : public BlockBuilderNode {
    public:
     static ffi::Map<tirx::Var, PrimExpr> Collect(const StructInfo& struct_info) {
       StructInfoVarCollector collector;
-      collector(struct_info);
+      collector(struct_info);   // collector.operator()(struct_info);  =>  collector.VisitStructInfo(struct_info);
       return collector.shape_var_map_;
     }
 
    private:
+    // 真正识别 tirx.var 的函数
     void VisitStructInfo_(const TensorStructInfoNode* op) final {
       if (const auto* shape_expr = op->shape.as<ShapeExprNode>()) {
         for (const PrimExpr& s : shape_expr->values) {

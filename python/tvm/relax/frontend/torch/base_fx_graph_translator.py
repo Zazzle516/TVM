@@ -24,6 +24,7 @@ import abc
 import math
 from collections.abc import Callable
 from functools import reduce
+import sys
 
 import tvm
 from tvm import relax, tirx
@@ -39,7 +40,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
         import torch  # type: ignore
         from torch import fx
 
-        self.env: dict[fx.Node, relax.Expr] = {}
+        self.env: dict[fx.Node, relax.Expr] = {}        # Node2Relax expression mapping  SSA Table  计算图节点->表达式(?? 具体有什么内容)
         self.params: dict[torch.Tensor, relax.Expr] = {}
         self.block_builder: relax.BlockBuilder = None
         self.convert_map: dict[torch.nn.Module | str, Callable[[fx.Node], relax.Var]] = (
@@ -49,6 +50,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
     ########## Utilities ##########
 
     # Q: 这个只是被 custom 调用吗   tvm 本身支持的基础算子是在哪里写进去的
+    # Q: 如果存在  那么应该是什么样子呢
     def update_convert_map(self, custom_convert_map: dict[str, Callable]):
         """Update self.convert_map with custom convert map
 
@@ -170,8 +172,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
     def retrieve_args(self, node: fx.Node):
         return self._retrieve_args(node.args)
 
-    # Q: 这里处理的是 fx 的参数列表
-    # Q: fx 的参数列表是长什么样的
+    # 递归遍历 node.args  把每一个 fx.node 替换为 self.env 中的 relax.Var
     def _retrieve_args(self, node):
         from torch import fx
 
@@ -188,8 +189,8 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
         else:
             return node
 
-    # Q: 按理来说  这里在判断的时候应该有个列表  记录了所有支持的 ops (self.convert_map)
-    # Q: 追踪到 self.update 也没看到在哪调用了啊...
+    # 在 self.convert_map 记录了目前所有支持的算子
+    # 针对每一种前端都会手写写入对应的 create_convert_map() eg. python/tvm/relax/frontend/torch/exported_program_translator.py
     def _check_unsupported_func_type(self, nodes: list[fx.Node]):
         missing_func_types = list(
             {
@@ -202,7 +203,6 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
 
     ########## Unary Ops ##########
 
-    # Q: 这个的执行逻辑要再仔细看下
     def _unary_op(self, op: Callable) -> Callable:
         from torch import fx
 
@@ -417,6 +417,7 @@ class BaseFXGraphImporter(metaclass=abc.ABCMeta):
         return self.block_builder.emit(result)
 
     def _softmax(self, node: fx.Node) -> relax.Var:
+        print("[Zazzle] call _softmax", file=sys.stderr, flush=True)
         x = self.env[node.args[0]]
         dim = node.args[1] if len(node.args) > 1 else node.kwargs.get("dim", -1)
         return self.block_builder.emit(relax.op.nn.softmax(x, dim))

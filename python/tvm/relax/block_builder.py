@@ -22,6 +22,7 @@ from collections.abc import Callable, Sequence
 from typing import Any, Optional
 
 import tvm_ffi
+import sys
 
 import tvm
 from tvm import relax as rx
@@ -52,6 +53,7 @@ class FunctionScope:
         self._is_emit_func_output_called = False
 
     def __enter__(self):
+        print("[Zazzle] FunctionScope __enter__", file=sys.stderr, flush=True)
         self._bb._enter_function_scope(self)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -68,6 +70,9 @@ class DataflowScope:
         self._bb = block_builder
 
     def __enter__(self):
+        print("[Zazzle] DataflowScope __enter__", file=sys.stderr, flush=True)
+        # Q: 为什么要先退出
+        # A: 因为查看 __exit__ 代码是结尾默认生成一个 Binding Block  所以要先结束上一个 Block  挂到 func scope 中
         block = self._bb._end_block()
         if len(block.bindings) > 0:
             self._bb._func._blocks.append(block)
@@ -76,7 +81,11 @@ class DataflowScope:
     def __exit__(self, ptype, value, trace):
         block = self._bb._end_block()
         if len(block.bindings) > 0:
+            print("[Zazzle] DataflowScope __exit__", file=sys.stderr, flush=True)
+            # 把 DataflowBlock 挂载到 func 上
             self._bb._func._blocks.append(block)
+        # Q: 为什么每次都需要在 Scope 退出的时候打开一个默认的 Binding Block
+        # A: 在 scope 切换之间  builder 里必须始终正好有一个打开中的 block  保证程序执行的正确性
         self._bb._begin_binding_block()
 
 
@@ -155,6 +164,8 @@ class BlockBuilder(Object):
 
     __slots__ = ("__dict__",)
 
+    # class-level stack shared by all BlockBuilder obj
+    # Only and always be one active BlockBuilder
     _stack = []
 
     @staticmethod
@@ -167,6 +178,7 @@ class BlockBuilder(Object):
 
     def __init__(self, mod: IRModule = None):
         # Which functions are currently being defined
+        # [FunctionScope(main)]
         self._func_stack: list[FunctionScope] = []
         self.__init_handle_by_constructor__(_ffi_api.BlockBuilderCreate, mod)  # type: ignore
 
@@ -189,10 +201,13 @@ class BlockBuilder(Object):
             )
 
     def _enter_function_scope(self, func_scope):
+        print("[Zazzle] BlockBuilder _enter_function_scope", file=sys.stderr, flush=True)
         BlockBuilder._stack.append(self)
         self._func_stack.append(func_scope)
         self.begin_scope(func_scope._params)
+        print("[Zazzle] Begin Binding Blcok", file=sys.stderr, flush=True)
         self._begin_binding_block()
+        print("[Zazzle] Begin Binding Blcok End", file=sys.stderr, flush=True)
 
     def _exit_function_scope(self, exc_type, exc_val, exc_tb):
         # record
@@ -247,6 +262,9 @@ class BlockBuilder(Object):
         ret: FunctionScope
             A FunctionScope for building a Relax function node.
         """
+        # QA: 这里在处理的时候  是针对整个 block_builder 对应到之前 input lifting 把所有参数都作为输入
+        # In the frontend translation time, it first do the input-lifting(torch)
+        # so that even the params inside the model can be seen as input for TVM, so that later it can be seen in block_builder
         if isinstance(params, rx.Var):
             params = [params]
         elif isinstance(params, list | tuple):
@@ -592,12 +610,18 @@ class BlockBuilder(Object):
         output = self._normalize_python_tuple(output)
         return _ffi_api.BlockBuilderEmitOutput(self, output, name_hint)  # type: ignore
 
+    # call1: 子函数构建: 把累积的 blocks 和返回值打包成一个 relax.Function  以 unique_name 注册  并返回它的 GlobalVar  这样外层代码就可以引用这个分支函数
+    # call2: Top exported program: 翻译整个 ExportedProgram  Dataflow Block 通过 emit_output 被关闭  得到的 output 作为函数返回值
+    # 声明 output 为 GlobalVar  调用 emit_func_output 都会把 rx.Function 加入 module  GlobalVar 只是引用句柄
     def emit_func_output(
         self,
         output: Expr | Tuple | list[Expr],
         params: Var | Tuple | list[Var] | None = None,
     ) -> GlobalVar:
+        print("[Zazzle] emit_func_output", file=sys.stderr, flush=True)
         """Emit output for the function.
+        接收普通 Var 的 output  结束当前 binding block  把 [blocks...] + output 包装成一个 SeqExpr
+        对其做 normalization  构造 relax.Function  并通过 add_func 注册到 module 中
 
         Parameters
         ----------
@@ -632,6 +656,7 @@ class BlockBuilder(Object):
         if BlockBuilder.current() is not self:
             raise RuntimeError("BlockBuilder.current() must be self.")
 
+        # Inside Dataflow Block
         output = self._normalize_python_tuple(output)
 
         block = self._end_block()
@@ -639,6 +664,11 @@ class BlockBuilder(Object):
             self._func._blocks.append(block)
 
         seqe = rx.SeqExpr(self._func._blocks, output)
+
+        # Q: 为什么之前在调用 functionScope 的时候  已经创建过 scope 这里还要创建 function 呢
+        # A: 这是两个不同层面的 function
+        # 在进入 _enter_function_scope 时的 function 并不是 relax.IR 层面的  只是 py 代码层面的容器  收集计算图信息
+        # 在获得全部内容之后  才正式调用 rx.Function 创建一个真正的 IR 节点  (要构造 rx.Function 必须一次性提供所有信息)
 
         # If the parameters were not provided as part of
         # `bb.function()`, then any variables provided from the params
@@ -653,6 +683,7 @@ class BlockBuilder(Object):
 
         # do not specify ret_struct_info and let constructor deduce
         # from seqe.struct_info
+        # 用 seqe 去创建一个 func
         func = rx.Function(self._func._params, seqe, is_pure=self._func._is_pure)
         for key, value in self._func._attrs.items():
             func = func.with_attr(key, value)

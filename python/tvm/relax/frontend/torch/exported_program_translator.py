@@ -21,6 +21,7 @@
 """PyTorch ExportedProgram of Relax."""
 
 import contextlib
+import sys
 from collections import ChainMap, OrderedDict
 from collections.abc import Callable
 from functools import partial
@@ -1297,6 +1298,12 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                     pass
         return False
 
+    # 把 fx.graph 中三种 Node 类型映射到 relax.expr
+    # Q: 为什么已经进行过 input lifting 并且写入 params 后还需要对 placeholderNode 进行映射
+    # A: input lifting 只是把模型计算图内部的 parameters, buffer, constant 提升到模型本身的输入 => placeholder 节点
+    # 然后在 create_input_vars() 中创建一个 relax.Var
+    # 但是基于 input lifting 创建的 relax.Var 按照名称字符串进行映射  但是 fx.Node 在实际引用的时候并不是字符串
+    # 所以要把每个 lifted 参数对应的 placeholder fx.Node 绑定到它对应的 relax.Var 上
     def _translate_fx_graph(
         self,
         graph_module,  # torch.fx.GraphModule or ExportedProgram
@@ -1312,6 +1319,9 @@ class ExportedProgramImporter(BaseFXGraphImporter):
         custom_ops = custom_ops or set()
         output_args = None
 
+        # Q: fx.op 明明有 6 种类型  为什么 TVM 只处理这四种
+        # A: 生成的 torch.export.ExportedProgram 不是通用的 torch.fx.symbolic_trace graph
+        # call_module 会完全 inline  call_method 会被改写成 call_function  如果出现这两个反而说明 torch.export 出了问题
         for node in nodes:
             if node.op == "placeholder":
                 if "grapharg" in node.meta and node.meta["grapharg"].fake_tensor is None:
@@ -1319,15 +1329,21 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                 if node.name in inputs_vars:
                     self.env[node] = inputs_vars[node.name]
                 # else: already set (e.g. branch subgraph placeholders)
+            # Q: 为什么只有针对 output 的处理这么特殊
+            # A: output 也是一个 fx.Node (node.op == "output")，但它和其他 op 有两点不同:
+            #    1. 它是终止节点，遍历到这里就 break，不会再有后续节点
+            #    2. 它本身不产生新的 SSA 值，只是引用之前已经在 self.env 中映射好的 node
+            #    所以处理 output 时只需要 retrieve_args 从 self.env 中取出对应的 relax.Var
             elif node.op == "output":
                 args = self.retrieve_args(node)
-                assert len(args) == 1
+                assert len(args) == 1       # 返回值是一个 tuple 包含所有返回值  可以是多个  这里判断的是 tuple 本身的数量
                 output_args = args[0]
                 break
             elif node.op == "get_attr":
                 self.env[node] = getattr(graph_module, node.target)
             elif node.op == "call_function":
                 func_name = node.target.__name__
+                # call emit embedding  执行具体的算子转换函数
                 if func_name in custom_ops:
                     self.env[node] = self.convert_map[func_name](node, self)
                 else:
@@ -1336,6 +1352,8 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                 raise ValueError(f"Unsupported op {node.op}")
 
         assert output_args is not None
+        # Q: 刚刚调用 retrieve_args 保留了原本的 output tree 嵌套结构   现在又不保留
+        # A: 因为 Relax tuple 期望得到一组 flatten sequence of Expr
         return self._flatten_output_args(output_args)
 
     @staticmethod
@@ -1499,6 +1517,7 @@ class ExportedProgramImporter(BaseFXGraphImporter):
 
     ########## Others ##########
 
+    # 针对 torch 前端注册算子
     def create_convert_map(
         self,
     ) -> dict[str, Callable[[fx.Node], relax.Var]]:
@@ -1886,6 +1905,7 @@ class ExportedProgramImporter(BaseFXGraphImporter):
 
         return str(symbol), tir_expr
 
+    # Create a map to relax.Var
     def create_input_vars(
         self, exported_program: torch.export.ExportedProgram
     ) -> tuple[dict[str, relax.Var], dict[str, relax.Var], dict[str, tuple[int, int | None]]]:
@@ -1915,27 +1935,53 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                     except (OverflowError, AttributeError, TypeError):
                         continue
 
+        # named_buffers(): only read `exported_program.graph_signature.buffers`
+        # buffer_name -> real tensor value
         named_buffers = OrderedDict(exported_program.named_buffers())
+        # print("[Zazzle] named_buffers: ", named_buffers)
+
+        # exported_program.graph_signature.input_specs 存储对应 graph_signature 内容的 meatadata
+        # 因为经过 input lifting 后 TVM 无法得到足够多的信息
+        # print("[Zazzle] exported_program.graph_signature.input_specs: ", exported_program.graph_signature.input_specs, "\n")
+        """
+        CONSTANT_TENSOR -> exported_program.tensor_constants[spec.target]
+        PARAMETER       -> exported_program.state_dict[spec.target]
+        BUFFER          -> exported_program.named_buffers()[spec.target]
+        USER_INPUT      -> FX placeholder node metadata
+        Tip: this is classified by type, so the <torch_shape> is a list
+        """
         for spec in exported_program.graph_signature.input_specs:
             name_hint = spec.arg.name
+
             if spec.kind is torch.export.graph_signature.InputKind.CONSTANT_TENSOR:
                 torch_shape = exported_program.tensor_constants[spec.target].shape
                 torch_dtype = exported_program.tensor_constants[spec.target].dtype
+
             elif spec.kind is torch.export.graph_signature.InputKind.USER_INPUT:
+                # USER_INPUT is a runtime value, placeholder don't have the real value
+                # But for the rest parameter, constant, buffers have the real value, state_dict, named_buffer, ...
+                # so TVM must use tensor_meta to recover info
                 for node in exported_program.graph.find_nodes(op="placeholder", target=spec.target):
+                    # there may be multipul inputs
                     if node.name == name_hint and "tensor_meta" in node.meta:
                         torch_shape = node.meta["tensor_meta"].shape
                         torch_dtype = node.meta["tensor_meta"].dtype
+                        # <PARAMETER, ..., BUFFER, ..., USER_INPUT>
+                        # All the graph signature ends with USER_INPUT
                         break
+
             elif spec.kind is torch.export.graph_signature.InputKind.BUFFER:
                 torch_shape = named_buffers[spec.target].shape
                 torch_dtype = named_buffers[spec.target].dtype
+
             elif spec.kind is torch.export.graph_signature.InputKind.PARAMETER:
                 torch_shape = exported_program.state_dict[spec.target].shape
                 torch_dtype = exported_program.state_dict[spec.target].dtype
+
             else:
                 raise ValueError(f"Unsupported input kind: {spec.kind}")
 
+            # 动态 shape 里的 tir::Var / tir::SizeVar 就是在这段逻辑里创建并塞进 relax.Var 的 StructInfo 里的
             relax_shape = []
             for s in torch_shape:
                 if isinstance(s, torch.SymInt):
@@ -1960,23 +2006,23 @@ class ExportedProgramImporter(BaseFXGraphImporter):
 
         return parameters_buffers_constants, user_inputs, range_constraints
 
+    # keep_params_as_input: keep the model weights as parameters not IRModule Constant
     def from_exported_program(
         self,
         exported_program: torch.export.ExportedProgram,
-        keep_params_as_input: bool,         # false
-        unwrap_unit_return_tuple: bool,     # false
+        keep_params_as_input: bool,         # True
+        unwrap_unit_return_tuple: bool,     # True
         no_bind_return_tuple: bool,         # false
         custom_convert_map: dict[str, Callable[[fx.Node, BaseFXGraphImporter], relax.Var]] | None,
     ) -> tvm.IRModule:
         """Convert a PyTorch ExportedProgram to a Relax program."""
-        print("[Zazzle] custom_convert_map before update: ", custom_convert_map)      # None
         # Update the conversion map with custom ops if provided.
+        # 其中的 custom_convert_map 必须显式给出  让用户自定义某个算子实现  plugin-like
         if custom_convert_map:
             custom_ops = set(custom_convert_map.keys())
             self.update_convert_map(custom_convert_map)
         else:
             custom_ops = set()
-        print("[Zazzle] custom_convert_map after update: ", custom_convert_map)       # None
 
         # Create input variables.
         (
@@ -1984,13 +2030,19 @@ class ExportedProgramImporter(BaseFXGraphImporter):
             user_input_vars,
             range_constraints,
         ) = self.create_input_vars(exported_program)
+        # After this, TVM see relax.Var as two parts: (input) and (parameter&buffer)
+        # But when exported, FX graph see them as same as placeholder
+        # So TVM also need to merge => (input, parameter&buffer) => match runtime
         inputs_vars = user_input_vars.copy()
         inputs_vars.update(parameter_buffer_constant_vars)
+        print("[Zazzle] inputs_vars: ", inputs_vars, file=sys.stderr, flush=True)
 
         # Initialize the block builder with a function and a dataflow block.
         self.block_builder = relax.BlockBuilder()
+        print("[Zazzle] after block_builder initialization", file=sys.stderr, flush=True)
         func_name = "main"
         func_attrs = {"num_input": len(user_input_vars)} if keep_params_as_input else {}
+
         if range_constraints:
             func_attrs["tir_var_lower_bound"] = {
                 var_name: lower for var_name, (lower, _) in range_constraints.items()
@@ -2014,16 +2066,28 @@ class ExportedProgramImporter(BaseFXGraphImporter):
         # because relax.If cannot appear inside a dataflow region.
         use_dataflow = not self._has_cond_op(nodes)
 
+        # Function 创建了这个 BlockBuilder 对应的 Scope  同时创建了 BindingBlock
+        # python/tvm/relax/block_builder.py => _enter_function_scope
+        # DataflowBlock 和 BindingBlock 是完全同级的存在  所以在进入 DataflowBlock 的时候
+        # 因为切换到一个新的 Block 所以必须先把上一个 Block 结束掉  所以先执行 end
         with self.block_builder.function(
+            # Tip: 这里传入的 params 就是后面 StructInfo 要处理的 tirx.var
             name=func_name, params=list(inputs_vars.values()).copy(), attrs=func_attrs
         ):
+            print("[Zazzle] call FunctionScope.__enter__", file=sys.stderr, flush=True)
             with contextlib.ExitStack() as stack:
+                # contextlib 和 enter_context 安全保护机制  不参与 TVM 逻辑
                 if use_dataflow:
+                    print("[Zazzle] use_dataflow: ", use_dataflow, file=sys.stderr, flush=True)
+                    # call class.DataflowScope.__enter__
                     stack.enter_context(self.block_builder.dataflow())
 
+                # nodes
+                print("[Zazzle] start _translate_fx_graph", use_dataflow, file=sys.stderr, flush=True)
                 output_args = self._translate_fx_graph(
                     exported_program.graph_module, nodes, inputs_vars, custom_ops
                 )
+                print("[Zazzle] output_args: ", output_args, file=sys.stderr, flush=True)
                 output_args = self._flatten_output_args(output_args)
 
                 if unwrap_unit_return_tuple and len(output_args) == 1:
@@ -2037,12 +2101,22 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                     if no_bind_return_tuple:
                         output = [self.block_builder.emit_output(r) for r in ret]
                     else:
+                        print("[Zazzle] enter dataflow", file=sys.stderr, flush=True)
+                        # 往当前 dataflow block 的 body 里追加一个 binding
+                        # 在 DataflowBlock 内部产生的值 DataflowVar 的作用范围只有 DataflowBlock 内部
+                        # 而如果想输出到非 DataflowBlock 中继续使用  就要插入一个 Binding  赋值给普通 Var 而不是 DataflowVar
+                        # 不会关闭函数  不声明函数返回值  只是把这个值从 dataflow 作用域中提升出来
                         output = self.block_builder.emit_output(ret)
+                        print("[Zazzle] enter dataflow end", file=sys.stderr, flush=True)
                 else:
                     output = list(ret) if no_bind_return_tuple else ret
+                # DataflowScope.__exit__ => _begin_binding_block()
 
+            # closing out a Relax function that was just built up by emitting bindings into a BlockBuilder
             self.block_builder.emit_func_output(output)
 
+        # ChainMap: 把多个 dict 串起来  作为一个大 dict 去查
+        # 把多个 mapping 当成一个整体  并且在发生名字冲突时让 parameters 优先
         to_bind_parameters = ChainMap(
             OrderedDict(exported_program.named_buffers()), exported_program.constants
         )
@@ -2050,7 +2124,13 @@ class ExportedProgramImporter(BaseFXGraphImporter):
             to_bind_parameters = to_bind_parameters.new_child(
                 OrderedDict(exported_program.named_parameters())
             )
+        # print("[Zazzle] to_bind_parameters: ", to_bind_parameters, file=sys.stderr, flush=True)
 
+        # fx graph 会把所有东西作为 placeholder node  无法区分真正的 input 和 parameter
+        # 在 exported program 中参数又分成三类，named_paramter，named_buffers，constants
+        # 此时所有的参数都是输入，这对部署来说并不友好，如果想调用这个计算图，必须知道所有 weights 的名字
+        # 引入 binding: 遍历 main 的参数列表，对于能在 binding 中找到的名字，从函数签名中移除，并且在函数体内部的使用替换成 relax.Constant
+        # 从参数 => relax.IR 的一部分
         binding = {}
         for tensor_name, tensor_value in to_bind_parameters.items():
             # find relax var name from graph signature
@@ -2059,10 +2139,19 @@ class ExportedProgramImporter(BaseFXGraphImporter):
                     bind_name = spec.arg.name
                     break
             binding[bind_name] = self._convert_pytorch_tensor_to_tvm(tensor_value)
+            # print("[Zazzle] binding[bind_name]: ", binding[bind_name], file=sys.stderr, flush=True)
+        # Q1: 如果 torch.export 不进行 input lifting 这里是不是就不需要额外处理
+        # A: 因为 torch.export 遵守 PT2 约定  目标就是产出一个纯函数  所以一定是 input lifted 的格式
+        # Q2: 为什么 TVM 在处理 input 的时候不直接把参数写进去  而是通过 binding dict 来解决
+        # A: 因为有切换权重的需求  不能总是写死  而且逻辑更清晰
+        # Q3: binding dict 的替换只针对 Constants 吗    # A: Yes
 
+        # tvm.IRModule
         mod = self.block_builder.get()
         mod = relax.transform.BindParams("main", binding)(mod)
 
+        # Tip: 在 ChainMap 中并没有对 param 进行处理  所以此时 param 仍然存在于 torch.exported 没有写入 mod
+        # 把 params 作为函数属性挂到 main 上
         if keep_params_as_input:
             parameters = dict(exported_program.named_parameters())
             params = [self._convert_pytorch_tensor_to_tvm(p) for p in parameters.values()]
@@ -2082,7 +2171,7 @@ def from_exported_program(
     ) = None,
     run_ep_decomposition: bool = True,
 ) -> tvm.IRModule:
-    print("[Zazzle] exported_program: ", exported_program, "\nEnd")
+    # print("[Zazzle] exported_program: ", exported_program, "\nEnd")
     """Convert a PyTorch ExportedProgram to a Relax program
 
     Parameters
@@ -2158,6 +2247,8 @@ def from_exported_program(
             return False
 
     def _has_sparse_tensors(ep: torch.export.ExportedProgram) -> bool:
+        # check the tensor type legitimate (dense tensor | sparse tensor)
+        # Default to dense tensor
         from itertools import chain
 
         all_potential_tensors = chain(
@@ -2170,6 +2261,7 @@ def from_exported_program(
 
     # Conditionally decompose into Core ATen operators
     if run_ep_decomposition and not _has_sparse_tensors(exported_program):
+        print("[Zazzle] run_ep_decomposition: ", run_ep_decomposition, file=sys.stderr, flush=True)
         exported_program = exported_program.run_decompositions()
 
     return ExportedProgramImporter().from_exported_program(

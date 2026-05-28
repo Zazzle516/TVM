@@ -1,46 +1,48 @@
+The difference is only for `named_parameters()`.
+
+So in your demo:
+
+```text
+Parameters / weights:
+  tok_embeddings.weight
+  lm_head.weight
+  attn weights
+  ffn weights
+  norm weights
+
+With keep_params_as_input=True:
+  kept as function inputs, then extracted by detach_params
+
+Buffers:
+  rope_cos
+  rope_sin
+  causal_mask
+
+Always:
+  bound into the module as constants
+```
+
+The short reason: `keep_params_as_input=True` matches the later `detach_params` + `vm["main"](tvm_input, *tvm_params)` flow. It keeps the compiled model structure separate from the learned weight values.
+
+
 # BaseFXGraphImporter
 
 This file defines `BaseFXGraphImporter`, an abstract base class that translates a PyTorch FX graph into a TVM Relax IR program, one FX node at a time.
 
 Concrete subclasses (e.g., `FXGraphImporter`, `ExportedProgramImporter`) inherit it and provide the actual `create_convert_map()` mapping from PyTorch ops → converter methods defined here.
 
-  
-## 1. Core state (__init__, lines 38–47)
 
-```sh
-self.env         : dict[fx.Node, relax.Expr]   # FX node → translated Relax Expr
-self.params      : dict[torch.Tensor, relax.Expr]  # PyTorch param tensor → Relax Var/const
-self.block_builder : relax.BlockBuilder        # Emits Relax IR (DataflowBlock)
-self.convert_map : dict[op_target, callable]   # op dispatcher, filled by subclass
-```
 
-The driver loops over FX nodes, looks up the converter in `convert_map`, calls it, and stashes the resulting `relax.Var` in `self.env[node]`. Later nodes that reference this node retrieve its translated value through `self.env`.
+
+
 
 ## 2. Utilities (lines 49–196)
 
-- _convert_data_type (62) — maps PyTorch dtype/string → TVM dtype string ("float32", "int64", …).
 - _convert_torch_tensor_to_relax (104) — turns a PyTorch param tensor into a relax.const.
 - shape_of (110) — returns shape from a Relax TensorStructInfo or PyTorch tensor.
 - _promote_common_dtype (123) — applies PyTorch type-promotion rules for binary ops.
 - retrieve_args / _retrieve_args (169) — recursively resolves a node's args (which may be FX nodes, lists, tuples, dicts, or constants) into Relax exprs by looking each up in self.env.
 - _check_unsupported_func_type (188) — pre-flight check that every call_function node has a converter.
-
-## 3. Op converters (the bulk of the file)
-
-Each converter takes an `fx.Node`, reads its inputs via `self.env`, emits Relax ops via `self.block_builder.emit(...)`, and returns the new `relax.Var`. They are grouped by category
-
-| Section | Examples (file:line) |
-|---|---|
-| Unary | `_unary_op` 200, `_celu` 208, `_clamp` 236, `_gelu` 349, `_softmax` 413, `_softshrink` 430, `_tril_triu` 463 |
-| Binary | `_binary_op` 476 (handles dtype promotion + scalar/tensor mixing), `_div` 518, `_fmod` 544, `_rsub` 558, `_isin` 568 |
-| Linear algebra | `_linalg_vector_norm` 584 |
-| Neural network | adaptive pools (619/635/651), `_addmm` 667, `_avg_poolNd` 689–812, `_baddbmm` 814, conv & conv-transpose 1D/2D/3D (836–1163), `_cross_entropy_loss` 1165, `_einsum` 1184, `_embedding_impl` 1191, `_layer_norm` 1208–1261, `_linear` 1263, `_max_poolNd` 1270–1447, `_pad`/`_constant_pad_nd` 1449/1467, `_pixel_shuffle` 1484, `_scaled_dot_product_attention` 1493, `_unbind` 1554 |
-| Statistical | `_mean`/`_median`/`_norm`/`_prod`/`_std`/`_sum`/`_var`/`_var_correction`/`_any` 1570–1727 |
-| Search | `_argmax_argmin` 1731, `_where` 1742, `_bucketize` 1748 |
-| Manipulation | `_argsort`/`_broadcast_to`/`_cat`/`_chunk`/`_cumprod`/`_cumsum`/`_expand`/`_flatten`/`_flip`/`_gather`/`_index_put`/`_index_tensor`/`_meshgrid`/`_slice_scatter`/`_permute`/`_repeat`/`_roll`/`_reshape`/`_scatter`/`_sort`/`_split`/`_squeeze`/`_stack`/`_take`/`_tile`/`_topk`/`_transpose` 1762–2284 |
-| Creation | `_detach`/`_copy_`/`_to_copy`/`_arange`/`_empty`/`_eye`/`_fill`/`_full`/`_full_like`/`_index_select`/`_masked_fill`/`_masked_select`/`_new_ones`/`_new_zeros`/`_ones`/`_linspace` 2288–2572 |
-| DataType | `_to` 2576, `_type_as` 2589 |
-| Others | `_getitem` 2597 (the most complex — handles int/slice/None/Ellipsis/fx.Node indices via take + strided_slice + reshape), `_item` 2684, `_sym_size_int` 2688, `_zeros_inplace` 2703, `_zeros_like` 2709 |
 
 ## 4. Common patterns
 
@@ -201,3 +203,8 @@ In the subclass that handles `ExportedProgram` (`exported_program_translator.py`
 - For each `USER_INPUT` → becomes a real Relax function input Var.
 
 After this lift step, `self.env[placeholder_node]` holds a `relax.Expr` for every argument, and the rest of the file we discussed simply consumes `self.env` per node.
+
+
+Q: 代码有两个 IR Module `include/tvm/ir/module.h` 然后在 tvm.py 端有多个 IR Module
+
+它们是什么关系

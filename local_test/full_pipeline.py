@@ -73,11 +73,12 @@ def dump_mod(title: str, mod, path: str):
     print("=" * 90)
     print(title)
     print("=" * 90)
-    mod.show()
+    script = strip_ansi(mod.script())
+    print(script)
 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
-        f.write(strip_ansi(mod.script()))
+        f.write(script)
 
 
 def to_numpy(x):
@@ -331,7 +332,7 @@ def print_imported_device_sources(executable, max_chars=6000):
                     print(f"Cannot inspect source: {e}")
                     continue
 
-            print(src[:max_chars])
+            print(strip_ansi(src[:max_chars]))
             if len(src) > max_chars:
                 print(f"\n... truncated, full source has {len(src)} chars ...")
 
@@ -366,20 +367,23 @@ def main():
     # python/tvm/relax/frontend/torch/base_fx_graph_translator.py
     # python/tvm/relax/frontend/common.py
     mod, params = export_to_relax(torch_model, input_ids)
-    sys.exit(0)
+    # sys.exit(0)
     dump_mod(
         "STAGE 1: Imported Relax IRModule from PyTorch",
         mod,
         "logs/01_imported_relax.py",
     )
+    # sys.exit(0)
 
     # 2) Legalize once so you can inspect Relax + TensorIR before fusion/schedule
+    print("[Zazzle] after export to relax begin LegalizeOps", file=sys.stderr, flush=True)
     mod_legalized = relax.transform.LegalizeOps()(mod)
     dump_mod(
         "STAGE 2: After LegalizeOps: Relax call_tir + TensorIR PrimFuncs",
         mod_legalized,
         "logs/02_legalized.py",
     )
+    sys.exit(0)
 
     # 3) Optimize for CUDA
     dev = tvm.cuda(0)
@@ -442,6 +446,22 @@ def main():
 if __name__ == "__main__":
     main()
 
-# Q: TVM Module
+# ninja -C build
 
-# Q: tvm_ffi 是干什么的
+# PYTHONUNBUFFERED=1 TVM_TRACE_BLOCK_BUILDER=1 .venv/bin/python -u local_test/full_pipeline.py > run.log 2>&1
+
+"""
+from_exported_program()      <-  YOU ARE HERE
+        ↓
+detach_params()              <- step A
+        ↓
+LegalizeOps                  <- step B (inside relax.get_pipeline("zero"))
+        ↓
+relax.get_pipeline("zero")   <- step C: fusion, normalization, etc.
+        ↓
+DLight ApplyDefaultSchedule  <- step D: GPU scheduling
+        ↓
+tvm.compile                  <- step E: codegen â CUDA + host
+        ↓
+relax.VirtualMachine         <- step F: runtime execution
+"""

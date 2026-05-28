@@ -16,6 +16,12 @@
  * specific language governing permissions and limitations
  * under the License.
  */
+
+ /*
+ Q: 为什么会有 XXXNode 和 XXX 这种命名
+ A: 在 3rdparty/tvm-ffi/include/tvm/ffi/object.h the TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE re-write operator->()
+ */
+
 #ifndef TVM_RELAX_STRUCT_INFO_H_
 #define TVM_RELAX_STRUCT_INFO_H_
 
@@ -32,6 +38,10 @@
 
 namespace tvm {
 namespace relax {
+
+/*
+  xxxNode is the real heap-allocated obj while xxx is the managed ref to it
+*/
 
 /*!
  * \brief Opaque object.
@@ -212,6 +222,7 @@ class TensorStructInfo : public StructInfo {
   TVM_DLL TensorStructInfo(DataType dtype, int ndim, ffi::Optional<VDevice> vdevice = std::nullopt,
                            Span span = Span());
 
+  // Manage a point to TensorStructInfoNode
   TVM_FFI_DEFINE_OBJECT_REF_METHODS_NULLABLE(TensorStructInfo, StructInfo, TensorStructInfoNode);
 };
 
