@@ -46,7 +46,7 @@ namespace relax {
  * - Scope management:
  *   - Manages block scopes for bulding nested blocks.
  *   - Emit bindings to the current scope.
- *   - Construct blocks by calling EndScope. [Zazzle]: wrong, blocks are constructed by EndBlock
+ *   - Construct blocks by calling EndScope.
  * - Normalization: Take an Expr, normalize it
  *   to deduce shape/type, turn things into normal forms.
  *
