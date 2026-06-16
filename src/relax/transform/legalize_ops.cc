@@ -415,6 +415,7 @@ namespace transform {
 Pass LegalizeOps(ffi::Optional<ffi::Map<ffi::String, ffi::Function>> cmap,
                  ffi::Optional<ffi::Array<ffi::String>> skip_ops, bool enable_warning) {
   auto pass_func = [=](IRModule mod, PassContext pc) {
+    LOG(INFO) << "[Zazzle] LegalizeOps Pass";
     bool apply_legalize_ops =
         pc->GetConfig<Bool>("relax.transform.apply_legalize_ops").value_or(Bool(true))->value;
     if (apply_legalize_ops) {
