@@ -26,6 +26,8 @@
 
 #include <tvm/relax/expr.h>
 
+/* attrs 文件只定义算子携带的编译期属性，不定义完整算子 */
+
 namespace tvm {
 namespace relax {
 
@@ -52,6 +54,20 @@ struct EinsumAttrs : public AttrsNodeReflAdapter<EinsumAttrs> {
   }
   TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.attrs.EinsumAttrs", EinsumAttrs, BaseAttrsNode);
 };  // struct EinsumAttrs
+
+/*! \brief Attributes used in zazzle operator */
+struct ZazzleAttrs : public AttrsNodeReflAdapter<ZazzleAttrs> {
+  double padding;
+  DataType out_dtype;
+
+  static void RegisterReflection() {
+    namespace refl = tvm::ffi::reflection;
+    refl::ObjectDef<ZazzleAttrs>()
+        .def_ro("padding", &ZazzleAttrs::padding, "The padding param of ZazzleOp")
+        .def_ro("out_dtype", &ZazzleAttrs::out_dtype, "The data type of the output tensor");
+  }
+  TVM_FFI_DECLARE_OBJECT_INFO_FINAL("relax.attrs.ZazzleAttrs", ZazzleAttrs, BaseAttrsNode);
+};  // struct ZazzleAttrs
 
 }  // namespace relax
 }  // namespace tvm

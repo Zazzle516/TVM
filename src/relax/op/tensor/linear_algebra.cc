@@ -261,6 +261,45 @@ TVM_REGISTER_OP("relax.einsum")
     .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoEinsum)
     .set_attr<Bool>("FPurity", Bool(true));
 
+/* relax.zazzle*/
+
+Expr zazzle(Expr x1, Expr x2, double padding, ffi::Optional<DataType> out_dtype) {
+  ffi::ObjectPtr<ZazzleAttrs> attrs = ffi::make_object<ZazzleAttrs>();
+  attrs->padding = padding;
+  attrs->out_dtype = out_dtype.value_or(DataType::Void());
+
+  static const Op& op = Op::Get("relax.zazzle");
+  return Call(op, {std::move(x1), std::move(x2)}, Attrs{attrs}, {});
+}
+
+TVM_FFI_STATIC_INIT_BLOCK() {
+  namespace refl = tvm::ffi::reflection;
+  refl::GlobalDef().def("relax.op.zazzle", zazzle);
+}
+
+StructInfo InferStructInfoZazzle(const Call& call, const BlockBuilder& ctx) {
+  if (call->args.size() != 3) {
+    ctx->ReportFatal(Diagnostic::Error(call) << "zazzle should take 3 arguments.");
+  }
+
+  auto input_sinfo = GetInputTensorStructInfo(call, ctx);
+  auto x1_sinfo = input_sinfo[0];
+  auto x2_sinfo = input_sinfo[1];
+  auto padding_sinfo = input_sinfo[2];
+
+  VDevice vdev = VDevice();
+  if (x1_sinfo->vdevice.defined() && x2_sinfo->vdevice.defined()) {
+    vdev = x1_sinfo->vdevice.value();
+  }
+
+  const auto* attrs = call->attrs.as<MatmulAttrs>();
+  DataType out_dtype = attrs->out_dtype.is_void()
+                           ? InferBinaryArithOpOutDtype(call, ctx, x1_sinfo, x2_sinfo)
+                           : attrs->out_dtype;
+
+                           
+}
+
 /* relax.outer */
 
 Expr outer(Expr x1, Expr x2) {

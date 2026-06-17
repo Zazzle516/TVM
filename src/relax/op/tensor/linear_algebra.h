@@ -52,6 +52,17 @@ Expr matmul(Expr x1, Expr x2, ffi::Optional<DataType> out_dtype);
 Expr einsum(Expr operands, ffi::String subscripts);
 
 /*!
+ * \brief Self defined Zazzle Operation
+ * \param x1 The first input tensor
+ * \param x2 The second input tensor
+ * \param padding param
+ * \param out_dtype The data type of the zazzle result
+ * Zazzle = x1 @ x2 + padding
+ * \return The computed result
+*/
+Expr zazzle(Expr x1, Expr x2, double padding, ffi::Optional<DataType> out_dtype);
+
+/*!
  * \brief Compute the outer product of two input expressions.
  * \param x1 The first input expression.
  * \param x2 The second input expression.
