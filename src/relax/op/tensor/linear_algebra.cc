@@ -54,6 +54,7 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("relax.op.matmul", matmul);
 }
 
+// 在编译期间计算出结果的 TensorStructInfo
 StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
   ffi::Array<TensorStructInfo> input_sinfo = GetInputTensorStructInfo(call, ctx);
   Expr lhs = call->args[0];
@@ -61,6 +62,13 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
   TensorStructInfo x1_sinfo = input_sinfo[0];
   TensorStructInfo x2_sinfo = input_sinfo[1];
 
+  // 1. 指定结果的 vdev
+  // Q: VDevice 是什么
+  // A: 每个 Relax 表达式都会有 StructInfo  而如果是 TensorStructInfo  可能会有 VDevice 字段 (只针对 Tensor 存在)
+  // VDevice: 回答这个 Relax tensor value 在编译期被认为应该位于哪个设备 / target 上
+  // Q: 为什么 matmul 需要指定 vdev
+  // A: 因为 matmul 的结果创建了一个新的 Tensor 这个 ouput_tensor 的 TensorStructInfo 和 VDevice 都需要指定
+  // 而如果只是复制一个输入的话  是不需要指定的  直接继承这些信息就好
   VDevice vdev = VDevice();
   if (x1_sinfo->vdevice.defined() && x2_sinfo->vdevice.defined()) {
     if (x1_sinfo->vdevice.value() == x2_sinfo->vdevice.value()) {
@@ -72,17 +80,21 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
     vdev = x2_sinfo->vdevice.value();
   }
 
+  // 2. 指定结果的 dtype
   const auto* attrs = call->attrs.as<MatmulAttrs>();
   DataType out_dtype = attrs->out_dtype.is_void()
                            ? InferBinaryArithOpOutDtype(call, ctx, x1_sinfo, x2_sinfo)
                            : attrs->out_dtype;
 
+  // 3. 处理未知 rank
   if (x1_sinfo->IsUnknownNdim() || x2_sinfo->IsUnknownNdim()) {
     if (vdev.defined()) {
       return TensorStructInfo(out_dtype, kUnknownNDim, vdev);
     }
     return TensorStructInfo(out_dtype, kUnknownNDim);
   }
+
+  // 4. 验证输入非标量
   int x1_ndim = x1_sinfo->ndim;
   int x2_ndim = x2_sinfo->ndim;
   if (x1_ndim == 0) {
@@ -100,6 +112,7 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
                      << ", which is scalar (zero-dimensional) tensor.");
   }
 
+  // 5. 应用 matmul rank promotion 规则
   int x1_prepended = 0;
   int x2_appended = 0;
   if (x1_ndim == 1) {
@@ -287,6 +300,7 @@ StructInfo InferStructInfoZazzle(const Call& call, const BlockBuilder& ctx) {
   auto x2_sinfo = input_sinfo[1];
   auto padding_sinfo = input_sinfo[2];
 
+  // 1. 指定 vdev
   VDevice vdev = VDevice();
   if (x1_sinfo->vdevice.defined() && x2_sinfo->vdevice.defined()) {
     vdev = x1_sinfo->vdevice.value();
@@ -297,8 +311,20 @@ StructInfo InferStructInfoZazzle(const Call& call, const BlockBuilder& ctx) {
                            ? InferBinaryArithOpOutDtype(call, ctx, x1_sinfo, x2_sinfo)
                            : attrs->out_dtype;
 
-                           
+  // 2. 指定 dtype
+  if (x1_sinfo) {
+
+  }
 }
+
+TVM_REGISTER_OP("relax.zazzle")
+    .set_attrs_type<ZazzleAttrs>()
+    .set_num_inputs(3)
+    .add_argument("x1", "Tensor", "The first input tensor.")
+    .add_argument("x2", "Tensor", "The second input tensor.")
+    .add_argument("padding", "double", "Param.")
+    .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoZazzle)
+    .set_attr<Bool>("FPurity", Bool(true));
 
 /* relax.outer */
 
