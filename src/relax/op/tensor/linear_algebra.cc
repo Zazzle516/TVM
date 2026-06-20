@@ -61,14 +61,18 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
   Expr rhs = call->args[1];
   TensorStructInfo x1_sinfo = input_sinfo[0];
   TensorStructInfo x2_sinfo = input_sinfo[1];
+  // Q: 为什么 matmul 的结果需要新建 TensorStructInfo
+  // A: 首先每个 op call 都需要 result.TensorStructInfo  但是有的 op 计算不改变形状  有的会改变
+  // eg. matmul: [M, K]x[K, N]=[M, N] 会改变输出形状  所以需要手动推导
+  // eg. cos: [N, C, H, W] = [N, C, H, W]  不改变输出形状  直接复用即可
 
   // 1. 指定结果的 vdev
   // Q: VDevice 是什么
-  // A: 每个 Relax 表达式都会有 StructInfo  而如果是 TensorStructInfo  可能会有 VDevice 字段 (只针对 Tensor 存在)
-  // VDevice: 回答这个 Relax tensor value 在编译期被认为应该位于哪个设备 / target 上
-  // Q: 为什么 matmul 需要指定 vdev
-  // A: 因为 matmul 的结果创建了一个新的 Tensor 这个 ouput_tensor 的 TensorStructInfo 和 VDevice 都需要指定
-  // 而如果只是复制一个输入的话  是不需要指定的  直接继承这些信息就好
+  // A: 每个 Relax 表达式都会有 StructInfo  而如果是 TensorStructInfo  可能会有 VDevice 字段 (只针对
+  // Tensor 存在) VDevice: 回答这个 Relax tensor value 在编译期被认为应该位于哪个设备 / target 上 Q:
+  // 为什么 matmul 需要指定 vdev A: 因为 matmul 的结果创建了一个新的 Tensor 这个 ouput_tensor 的
+  // TensorStructInfo 和 VDevice 都需要指定 而如果只是复制一个输入的话  是不需要指定的
+  // 直接继承这些信息就好
   VDevice vdev = VDevice();
   if (x1_sinfo->vdevice.defined() && x2_sinfo->vdevice.defined()) {
     if (x1_sinfo->vdevice.value() == x2_sinfo->vdevice.value()) {
@@ -80,13 +84,13 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
     vdev = x2_sinfo->vdevice.value();
   }
 
-  // 2. 指定结果的 dtype
+  // 2. 指定结果的 dtype  如果已经显式指定  那么直接复用
   const auto* attrs = call->attrs.as<MatmulAttrs>();
   DataType out_dtype = attrs->out_dtype.is_void()
                            ? InferBinaryArithOpOutDtype(call, ctx, x1_sinfo, x2_sinfo)
                            : attrs->out_dtype;
 
-  // 3. 处理未知 rank
+  // 3. 处理未知 rank  如果连 Rank 都无法确定  那么 Shape 也不可能推导出来  直接返回
   if (x1_sinfo->IsUnknownNdim() || x2_sinfo->IsUnknownNdim()) {
     if (vdev.defined()) {
       return TensorStructInfo(out_dtype, kUnknownNDim, vdev);
@@ -112,7 +116,7 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
                      << ", which is scalar (zero-dimensional) tensor.");
   }
 
-  // 5. 应用 matmul rank promotion 规则
+  // 5. 针对 rank=1 的特殊情况  应用 matmul rank promotion 规则  补充一个假维度
   int x1_prepended = 0;
   int x2_appended = 0;
   if (x1_ndim == 1) {
@@ -125,6 +129,7 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
   }
   int output_ndim = std::max(x1_ndim, x2_ndim) - x1_prepended - x2_appended;
 
+  // 6. 如果 ShapeExpr 未知  那么直接返回
   const auto* x1_shape = x1_sinfo->shape.as<ShapeExprNode>();
   const auto* x2_shape = x2_sinfo->shape.as<ShapeExprNode>();
   if (x1_shape == nullptr || x2_shape == nullptr) {
@@ -134,6 +139,9 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
     return TensorStructInfo(out_dtype, output_ndim);
   }
 
+  // 7. 执行 Shape 推导  参考 mlir 会切分成几部分  [contractDims, batchDims, extraDims]
+
+  // 7.1 Batch Dims
   ffi::Array<PrimExpr> x1_shape_prefix{x1_shape->values.begin(),
                                        x1_shape->values.end() - 2 + x1_prepended};
   ffi::Array<PrimExpr> x2_shape_prefix{x2_shape->values.begin(),
@@ -147,9 +155,11 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
     return TensorStructInfo(out_dtype, output_ndim);
   }
 
+  // 7.2 Contract Dims
   arith::Analyzer* analyzer = ctx->GetAnalyzer();
   PrimExpr x1_reduction_length = x1_shape->values[x1_sinfo->ndim - 1];
   PrimExpr x2_reduction_length = x2_shape->values[x2_ndim - 2];
+  // 算数证明规约值相同 k
   if (analyzer->CanProve(x1_reduction_length != x2_reduction_length)) {
     ctx->ReportFatal(Diagnostic::Error(call)
                      << "Matmul requires the reduction length of the operands to be equal.  "
@@ -159,6 +169,7 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
                      << x2_reduction_length << " are not equal.");
   }
 
+  // 7.3 Extra Dims
   ffi::Array<PrimExpr> output_shape = output_shape_prefix.value();
   if (!x1_prepended) {
     output_shape.push_back(x1_shape->values[x1_ndim - 2]);
@@ -167,6 +178,8 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
     output_shape.push_back(x2_shape->values[x2_ndim - 1]);
   }
   TVM_FFI_ICHECK_EQ(static_cast<int>(output_shape.size()), output_ndim);
+
+  // 8. 返回最终结果
   if (vdev.defined()) {
     return TensorStructInfo(ShapeExpr(output_shape), out_dtype, vdev);
   }
@@ -299,6 +312,7 @@ StructInfo InferStructInfoZazzle(const Call& call, const BlockBuilder& ctx) {
   auto x1_sinfo = input_sinfo[0];
   auto x2_sinfo = input_sinfo[1];
   auto padding_sinfo = input_sinfo[2];
+  // zazzle 相比于 matmul 额外处理 padding 编译时常量
 
   // 1. 指定 vdev
   VDevice vdev = VDevice();
@@ -306,14 +320,18 @@ StructInfo InferStructInfoZazzle(const Call& call, const BlockBuilder& ctx) {
     vdev = x1_sinfo->vdevice.value();
   }
 
-  const auto* attrs = call->attrs.as<MatmulAttrs>();
+  // 2. 指定 dtype
+  const auto* attrs = call->attrs.as<ZazzleAttrs>();
   DataType out_dtype = attrs->out_dtype.is_void()
                            ? InferBinaryArithOpOutDtype(call, ctx, x1_sinfo, x2_sinfo)
                            : attrs->out_dtype;
 
-  // 2. 指定 dtype
-  if (x1_sinfo) {
-
+  // 3. 处理未知 rank
+  if (x1_sinfo->IsUnknownNdim() || x2_sinfo->IsUnknownNdim()) {
+    if (vdev.defined()) {
+      return TensorStructInfo(out_dtype, kUnknownNDim, vdev);
+    }
+    return TensorStructInfo(out_dtype, kUnknownNDim);
   }
 }
 
