@@ -37,6 +37,7 @@ namespace relax {
 TVM_FFI_STATIC_INIT_BLOCK() {
   MatmulAttrs::RegisterReflection();
   EinsumAttrs::RegisterReflection();
+  ZazzleAttrs::RegisterReflection();
 }
 
 /* relax.matmul */
@@ -64,15 +65,16 @@ StructInfo InferStructInfoMatmul(const Call& call, const BlockBuilder& ctx) {
   // Q: 为什么 matmul 的结果需要新建 TensorStructInfo
   // A: 首先每个 op call 都需要 result.TensorStructInfo  但是有的 op 计算不改变形状  有的会改变
   // eg. matmul: [M, K]x[K, N]=[M, N] 会改变输出形状  所以需要手动推导
-  // eg. cos: [N, C, H, W] = [N, C, H, W]  不改变输出形状  直接复用即可
+  // eg. cos: [N, C, H, W] = [N, C, H, W]  不改变输出形状  直接复用 Shape
 
-  // 1. 指定结果的 vdev
+  // 1. 推理结果的 vdev
   // Q: VDevice 是什么
-  // A: 每个 Relax 表达式都会有 StructInfo  而如果是 TensorStructInfo  可能会有 VDevice 字段 (只针对
-  // Tensor 存在) VDevice: 回答这个 Relax tensor value 在编译期被认为应该位于哪个设备 / target 上 Q:
-  // 为什么 matmul 需要指定 vdev A: 因为 matmul 的结果创建了一个新的 Tensor 这个 ouput_tensor 的
-  // TensorStructInfo 和 VDevice 都需要指定 而如果只是复制一个输入的话  是不需要指定的
-  // 直接继承这些信息就好
+  // A: 每个 Relax 表达式都会有 StructInfo  而如果是 TensorStructInfo => VDevice
+  // VDevice: 回答这个 Relax tensor value 在编译期被认为应该位于哪个设备 / target 上
+  // Q: 为什么 matmul 需要指定 vdev
+  // A: 因为 matmul 的结果创建了一个新的 Tensor 这个 ouput_tensor 的
+  // TensorStructInfo 和 VDevice 都需要指定
+  // 而如果只是复制一个输入的话  是不需要指定的  直接继承这些信息就好
   VDevice vdev = VDevice();
   if (x1_sinfo->vdevice.defined() && x2_sinfo->vdevice.defined()) {
     if (x1_sinfo->vdevice.value() == x2_sinfo->vdevice.value()) {
@@ -303,44 +305,29 @@ TVM_FFI_STATIC_INIT_BLOCK() {
   refl::GlobalDef().def("relax.op.zazzle", zazzle);
 }
 
+// 编译期常量 padding 不参与判断  需要用户在前端直接给出 padding 具体数值  所以本质和 matmul 相同
 StructInfo InferStructInfoZazzle(const Call& call, const BlockBuilder& ctx) {
-  if (call->args.size() != 3) {
-    ctx->ReportFatal(Diagnostic::Error(call) << "zazzle should take 3 arguments.");
+  if (call->args.size() != 2) {
+    ctx->ReportFatal(Diagnostic::Error(call) << "zazzle should take 2 arguments.");
   }
 
-  auto input_sinfo = GetInputTensorStructInfo(call, ctx);
-  auto x1_sinfo = input_sinfo[0];
-  auto x2_sinfo = input_sinfo[1];
-  auto padding_sinfo = input_sinfo[2];
-  // zazzle 相比于 matmul 额外处理 padding 编译时常量
-
-  // 1. 指定 vdev
-  VDevice vdev = VDevice();
-  if (x1_sinfo->vdevice.defined() && x2_sinfo->vdevice.defined()) {
-    vdev = x1_sinfo->vdevice.value();
-  }
-
-  // 2. 指定 dtype
   const auto* attrs = call->attrs.as<ZazzleAttrs>();
-  DataType out_dtype = attrs->out_dtype.is_void()
-                           ? InferBinaryArithOpOutDtype(call, ctx, x1_sinfo, x2_sinfo)
-                           : attrs->out_dtype;
+  TVM_FFI_ICHECK(attrs != nullptr);
 
-  // 3. 处理未知 rank
-  if (x1_sinfo->IsUnknownNdim() || x2_sinfo->IsUnknownNdim()) {
-    if (vdev.defined()) {
-      return TensorStructInfo(out_dtype, kUnknownNDim, vdev);
-    }
-    return TensorStructInfo(out_dtype, kUnknownNDim);
-  }
+  ffi::ObjectPtr<MatmulAttrs> matmul_attrs = ffi::make_object<MatmulAttrs>();
+  matmul_attrs->out_dtype = attrs->out_dtype;
+
+  static const Op& matmul_op = Op::Get("relax.matmul");
+  Call matmul_call(matmul_op, call->args, Attrs(matmul_attrs), call->sinfo_args);
+  return InferStructInfoMatmul(matmul_call, ctx);
 }
 
+// argument: Runtime IR input expr
 TVM_REGISTER_OP("relax.zazzle")
     .set_attrs_type<ZazzleAttrs>()
-    .set_num_inputs(3)
+    .set_num_inputs(2)
     .add_argument("x1", "Tensor", "The first input tensor.")
     .add_argument("x2", "Tensor", "The second input tensor.")
-    .add_argument("padding", "double", "Param.")
     .set_attr<FInferStructInfo>("FInferStructInfo", InferStructInfoZazzle)
     .set_attr<Bool>("FPurity", Bool(true));
 

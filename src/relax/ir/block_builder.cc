@@ -485,6 +485,9 @@ class BlockBuilderImpl : public BlockBuilderNode {
     return &scope_stack_.back();
   }
 
+  // Q: 这个 Emit 函数在 torch->relax 的时候被调用了  从 relax->legalize 的时候也被调用了
+  // 我不太理解这个函数为什么可以跨层级调用
+  // A: 并没有跨层级  仍然局限在 relax layer
   /*!
    * \brief Emits an Expr, and returns the variable it is bound to.
    * \param expr The Expr to be emitted.
@@ -494,6 +497,11 @@ class BlockBuilderImpl : public BlockBuilderNode {
    *       and performs shape/type deductions by calling Normalize.
    * \return The new variable that \p expr is bound to.
    */
+  // Normalize:
+  // 1. Infer struct_info (result TensorStructInfo)
+  // 2. 把嵌套的多层表达变成单独的表达
+  // Binding:
+  // 把计算表达式 (op) 添加到当前的 BlockBuilder
   Var Emit(Expr expr, bool is_dataflow, ffi::String name_hint) {
     expr = this->Normalize(expr);
 
@@ -618,6 +626,24 @@ class BlockBuilderImpl : public BlockBuilderNode {
   Expr VisitExpr_(const OP* op) final { return ffi::GetRef<Expr>(op); }
 
 // TODO(relax-team): Check normalize logic after struct info.
+// 功能:
+// 遍历 Relax AST node  改写成 normal form  创建 binding  并推导 struct_info
+// 某种程度上  可以认为 Normalizer 是在处理文本  relax format
+// 1. Normalize(expr): 把 Relax 表达式转换到 Normalized Relax IR  推导缺失的 Struct Info
+// 2. NormalizeArgument(arg): 递归 Normalize 子表达式
+/*
+    如果参数不是 leaf expression  会把它 emit 到当前 block 中，并用一个 Var 替换它
+  eg. relax.add(relax.multiply(x, y), z)
+   => lv0 = relax.multiply(x, y)
+      relax.add(lv0, z)
+*/
+// Q: 为什么 Normalize 要针对每个 Node 类型单独写
+// A: 不同 Relax node 的字段不同  normalization 规则不同
+
+
+// Tip: 注意到是继承自 BlockBuilderImpl 和 ExprFunctor
+// BlockBuilderImpl: 可以管理 Block, Binding, Scope
+// ExprFunctor: 根据 Runtime 的 node 类型来遍历 / 重建 Relax 表达式
 
 // Normalizer on struct info:
 //
@@ -678,6 +704,8 @@ class Normalizer : public BlockBuilderImpl, private ExprFunctor<Expr(const Expr&
     }
   }
 
+  // leaf node: 在 normalization 中能不能被当作一个原子的 Relax value
+  // 面对 leaf node 直接返回
   RELAX_EXPR_NORMALIZER_LEAF(ExternFuncNode);
   RELAX_EXPR_NORMALIZER_LEAF(GlobalVarNode);
   RELAX_EXPR_NORMALIZER_LEAF(OpNode);
@@ -686,6 +714,8 @@ class Normalizer : public BlockBuilderImpl, private ExprFunctor<Expr(const Expr&
   RELAX_EXPR_NORMALIZER_LEAF(PrimValueNode);
   RELAX_EXPR_NORMALIZER_LEAF(StringImmNode);
   RELAX_EXPR_NORMALIZER_LEAF(DataTypeImmNode);
+
+  // 非 leaf node: 要根据 Node 的字段和规则归一化
 
   template <typename T>
   Expr VisitVar_(const typename T::ContainerType* var) {
@@ -696,6 +726,17 @@ class Normalizer : public BlockBuilderImpl, private ExprFunctor<Expr(const Expr&
     return ffi::GetRef<Var>(var);
   }
 
+  /*
+  实例化后:
+  Expr VisitVar_Var(const VarNode* var) {
+    TVM_FFI_ICHECK(var->struct_info_.defined())
+        << "Var " << var->name_hint() << " does not have struct info.";
+    return ffi::GetRef<Var>(var);
+  }
+  1. 检查 var 是否已经有 struct_info_
+  2. 把已有的 raw node pointer 重新包装成一个 Var object reference
+  3. 把 var 作为 Expr 返回
+  */
   Expr VisitExpr_(const VarNode* var_ptr) final {
     auto var = VisitVar_<Var>(var_ptr);
     if (HasVoidStructInfo(var)) {
@@ -1198,3 +1239,60 @@ TVM_FFI_STATIC_INIT_BLOCK() {
 }
 }  // namespace relax
 }  // namespace tvm
+
+/*
+基本上是的，但有一个重要细节。
+
+`NormalizeArgument(arg)` 会做这件事：
+
+```cpp
+Expr post = ExprFunctor::VisitExpr(arg);
+```
+
+这会根据 `arg` 的 node 类型 dispatch 到具体的 `VisitExpr_` 方法。那些方法会递归 normalize 它们内部的 Relax 子表达式。
+
+比如，如果 `arg` 是：
+
+```python
+R.add(R.multiply(x, y), z)
+```
+
+那么流程大致是：
+
+1. `NormalizeArgument(add_call)`；
+2. 调用 `add` 对应的 `VisitExpr_(CallNode*)`；
+3. `VisitExpr_(CallNode*)` 会对每个 call argument 调用 `NormalizeArgument`；
+4. 对于里面的 `multiply`，再次进入 `VisitExpr_(CallNode*)`；
+5. `multiply` 的参数 `x` 和 `y` 会到达 `VisitExpr_(VarNode*)`；
+6. `Var` 类似 leaf，原样返回；
+7. 因为 `multiply` 是 non-leaf，所以 `NormalizeArgument` 会把它 emit 成一个 binding；
+8. 然后外层的 `add` 会使用这个被 emit 出来的 var 作为参数。
+
+所以从概念上说，是的：它会递归向下遍历，直到到达 leaf / tuple-safe 的参数。
+
+但细节在于：它不是单纯返回一棵完整重建后的表达式树。对于 non-leaf argument，它 normalize 完之后，会 emit 一个 binding，然后返回这个 binding 对应的变量：
+
+```cpp
+if (!IsLeafOrTuple(arg)) {
+  Var var = this->Emit(post, "");
+  CurrentBindingBlockFrame()->normalize_binding_map[arg] = var;
+  return var;
+}
+```
+
+所以对 non-leaf node 来说，递归的结果会变成 ANF 风格的 binding：
+
+```python
+lv0 = R.multiply(x, y)
+lv1 = R.add(lv0, z)
+```
+
+而不是继续保留：
+
+```python
+R.add(R.multiply(x, y), z)
+```
+
+另外注意，`Tuple` 是特殊情况：`IsLeafOrTuple(arg)` 会把 tuple 当作 safe argument，但 `VisitExpr_(TupleNode*)` 仍然会递归 normalize tuple 里面的 fields。
+
+*/

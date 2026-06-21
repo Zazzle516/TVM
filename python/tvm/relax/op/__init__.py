@@ -89,7 +89,7 @@ from .create import (
 )
 from .datatype import astype, wrap_param
 from .index import dynamic_strided_slice, strided_slice, take
-from .linear_algebra import einsum, linear, matmul, outer
+from .linear_algebra import einsum, linear, matmul, zazzle, outer
 from .manipulate import (
     broadcast_to,
     collapse_sum_like,

@@ -31,7 +31,7 @@ def test_op_correctness():
 
 
 def _check_inference(bb: relax.BlockBuilder, call: relax.Call, expected_sinfo: relax.StructInfo):
-    ret = bb.normalize(call)
+    ret = bb.normalize(call)    # call FInferStructInfo
     tvm.ir.assert_structural_equal(ret.struct_info, expected_sinfo)
 
 
@@ -78,6 +78,8 @@ def test_matmul_infer_struct_info():
     )
 
 
+# 测试 relax.matmul 在 TIR 输入下仍能推导 Result TensorStructInfo
+# 测试的是编译的中间结果  target: InferStructInfoMatmul
 def test_matmul_infer_struct_info_shape_symbolic():
     bb = relax.BlockBuilder()
     m = tirx.Var("m", "int64")
@@ -208,6 +210,53 @@ def test_matmul_infer_struct_info_unequal_reduction_length():
     with pytest.raises(TVMError):
         bb.normalize(relax.op.matmul(x1, y1))
 
+
+# .venv/bin/python -m pytest tests/python/relax/test_op_linear_algebra.py::test_zazzle_infer_struct_info -q
+def test_zazzle_infer_struct_info():
+    bb = relax.BlockBuilder()
+    vdev0 = VDevice("llvm")
+    x0 = relax.Var("x", R.Tensor((3, 4), "float32"))
+    x1 = relax.Var("x", R.Tensor((4,), "float32"))
+    x2 = relax.Var("x", R.Tensor((2, 3, 5, 4), "float32"))
+    x3 = relax.Var("x", R.Tensor((2, 1, 4, 5), "float32"))
+    x4 = relax.Var("x", R.Tensor((2, 1, 4, 5)))
+    x5 = relax.Var("x", R.Tensor("float32"))
+    x6 = relax.Var("x", R.Tensor((2, 1, 4, 5), "float16"))
+    x7 = relax.Var("x", R.Tensor((3, 4), "float32", vdev0))
+    y0 = relax.Var("y", R.Tensor((4, 5), "float32"))
+    y1 = relax.Var("y", R.Tensor((4,), "float32"))
+    y2 = relax.Var("y", R.Tensor((2, 3, 4, 5), "float32"))
+    y3 = relax.Var("y", R.Tensor((6, 1, 3, 5, 7), "float32"))
+    y4 = relax.Var("y", R.Tensor("float32", ndim=5))
+    y5 = relax.Var("y", R.Tensor())
+    y6 = relax.Var("y", R.Tensor((4, 5), "float32", vdev0))
+    padding = 1
+
+    _check_inference(bb, relax.op.zazzle(x0, y0, padding), relax.TensorStructInfo((3, 5), "float32"))
+    _check_inference(bb, relax.op.zazzle(x7, y6, padding), relax.TensorStructInfo((3, 5), "float32", vdev0))
+    _check_inference(bb, relax.op.zazzle(x1, y1, padding), relax.TensorStructInfo((), "float32"))
+    _check_inference(bb, relax.op.zazzle(x1, y2, padding), relax.TensorStructInfo((2, 3, 5), "float32"))
+    _check_inference(bb, relax.op.zazzle(x2, y1, padding), relax.TensorStructInfo((2, 3, 5), "float32"))
+    _check_inference(
+        bb, relax.op.zazzle(x3, y3, padding), relax.TensorStructInfo((6, 2, 3, 4, 7), "float32")
+    )
+    _check_inference(bb, relax.op.zazzle(x4, y3, padding), relax.TensorStructInfo((6, 2, 3, 4, 7), ""))
+    _check_inference(bb, relax.op.zazzle(x3, y4, padding), relax.TensorStructInfo(dtype="float32", ndim=5))
+    _check_inference(bb, relax.op.zazzle(x5, y3, padding), relax.TensorStructInfo(dtype="float32"))
+    _check_inference(bb, relax.op.zazzle(x3, y5, padding), relax.TensorStructInfo(dtype=""))
+    _check_inference(
+        bb,
+        relax.op.zazzle(x3, y3, padding, out_dtype="float16"),
+        relax.TensorStructInfo((6, 2, 3, 4, 7), "float16"),
+    )
+    _check_inference(
+        bb,
+        relax.op.zazzle(x6, y3, padding, out_dtype="float16"),
+        relax.TensorStructInfo((6, 2, 3, 4, 7), "float16"),
+    )
+
+
+def test
 
 def test_linear():
     # Since linear is only a sugar for transpose + matmul + add,

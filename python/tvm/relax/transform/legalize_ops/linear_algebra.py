@@ -102,6 +102,32 @@ def _matmul(bb: BlockBuilder, call: Call) -> Expr:
     return bb.call_te(te_matmul, call.args[0], call.args[1], primfunc_name_hint="matmul")
 
 
+@register_legalize("relax.zazzle")
+def _zazzle(bb: BlockBuilder, call: Call) -> Expr:
+    # Q: 参考 python/tvm/relax/transform/legalize_ops/binary.py 为什么不能调用 TOPI 实现
+    # A: TOPI 是 TVM 提供的底层算子基础库  理论上是可以通过直接调用 TOPI API 来实现 zazzle
+    # 调用 relax.op.matmul 是为了复用 matmul 的语义处理
+    
+    attrs = call.attrs
+    out_sinfo = call.struct_info
+    # Q: 前两个函数都是通过 bb.emit 调用的  但是最后返回的是一个 relax add 表达式?
+    # A: bb.emit 本身会创建 Binding 把 matmul 和 broad_cast 计算绑定到 zazzle 上
+    # _zazzle 的返回值就是为了取代 relax.zazzle 原始执行  类似 MLIR 的 replace
+    # 用 add(%matmul_result, %broadcast_result) 替换原来的 zazzle
+
+    # 1. matmul
+    matmul_result = bb.emit(
+        relax.op.matmul(call.args[0], call.args[1], out_dtype=attrs.out_dtype)
+    )
+
+    # 2. broad_cast
+    padding = relax.const(attrs.padding, out_sinfo.dtype)
+    after_broadcast = bb.emit(relax.op.broadcast_to(padding, out_sinfo.shape))
+
+    # 3. add
+    return relax.op.add(matmul_result, after_broadcast)
+
+
 @register_legalize("relax.einsum")
 def _einsum(bb: BlockBuilder, call: Call) -> Expr:
     t = call.args[0]

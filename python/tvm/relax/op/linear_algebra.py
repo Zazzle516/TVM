@@ -90,6 +90,34 @@ def linear(
     return x + bias if bias is not None else x
 
 
+def zazzle(
+    x1: Expr, x2: Expr, padding: float = 0.0, out_dtype: str | DataType | None = None
+) -> Expr:
+    """Self defined operator, (x1 @ x2) + padding, with broadcasting on batched dimensions.
+
+    Parameters
+    ----------
+    x1: relax.Expr
+        The first input tensor.
+
+    x2: relax.Expr
+        The second input tensor.
+
+    padding: double (compile time constant)
+        The third input param.
+
+    out_dtype: Optional[Union[str, DataType]]
+        The data type of zazzle result.
+        When it is not specified, the output dtype will be the same as input dtype.
+
+    Returns
+    -------
+    result : relax.Expr
+        The computed result.
+    """
+    return _ffi_api.zazzle(x1, x2, float(padding), out_dtype)  # type: ignore
+
+
 def einsum(operands, subscripts):
     """Evaluates the Einstein summation convention on data
 

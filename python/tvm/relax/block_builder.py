@@ -327,6 +327,8 @@ class BlockBuilder(Object):
         else:
             return expr
 
+    # 针对 Expr 转换到 relax IR 表达 => emit Binding
+    # 如果在 DataflowBlock 内部 => dataflow_var  而如果在外部 => var
     def emit(self, expr: Expr, name_hint: str = "") -> Var:
         """Emit an expr.
         This infers the shape and type of the expr, create a variable,
