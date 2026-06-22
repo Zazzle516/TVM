@@ -114,6 +114,8 @@ def test_matmul_infer_struct_info_shape_symbolic():
     _check_inference(bb, relax.op.matmul(x3, y4), relax.TensorStructInfo(dtype="float32", ndim=5))
 
 
+# 只有 rank 信息是已知的
+# 判断 matmul 结果的 rank 和 dtype 是否正确  并应用 batched matmul 的 broadcasting 规则
 def test_matmul_infer_struct_info_shape_var():
     bb = relax.BlockBuilder()
     s0 = relax.Var("s0", relax.ShapeStructInfo(ndim=4))
@@ -137,6 +139,7 @@ def test_matmul_infer_struct_info_shape_var():
     _check_inference(bb, relax.op.matmul(x1, y2), relax.TensorStructInfo(dtype="float32", ndim=0))
 
 
+#
 def test_matmul_infer_struct_info_more_input_dtype():
     bb = relax.BlockBuilder()
     x0 = relax.Var("x", R.Tensor((3, 4), "float16"))
@@ -256,7 +259,32 @@ def test_zazzle_infer_struct_info():
     )
 
 
-def test
+def test_zazzle_infer_struct_info_shape_var():
+    bb = relax.BlockBuilder()
+    s0 = relax.Var("s0", relax.ShapeStructInfo(ndim=4))
+    s1 = relax.Var("s1", relax.ShapeStructInfo(ndim=3))
+    s2 = relax.Var("s3", relax.ShapeStructInfo(ndim=1))
+    s3 = relax.Var("s4", relax.ShapeStructInfo(ndim=1))
+    s5 = relax.Var("s5", relax.ShapeStructInfo())
+    x0 = relax.Var("x", relax.TensorStructInfo(s0, "float32"))
+    x1 = relax.Var("x", relax.TensorStructInfo(s2, "float32"))
+    x2 = relax.Var("x", relax.TensorStructInfo(s5, "float32"))
+    y0 = relax.Var("y", relax.TensorStructInfo(s1, "float32"))
+    y1 = relax.Var("y", relax.TensorStructInfo(s2, "float32"))
+    y2 = relax.Var("y", relax.TensorStructInfo(s3, "float32"))
+    padding = 1
+
+    _check_inference(bb, relax.op.zazzle(x0, y0, padding), relax.TensorStructInfo(dtype="float32", ndim=4))
+    _check_inference(bb, relax.op.zazzle(x1, y0, padding), relax.TensorStructInfo(dtype="float32", ndim=2))
+    _check_inference(bb, relax.op.zazzle(x2, y0, padding), relax.TensorStructInfo(dtype="float32"))
+    _check_inference(bb, relax.op.zazzle(x0, y1, padding), relax.TensorStructInfo(dtype="float32", ndim=3))
+    _check_inference(bb, relax.op.zazzle(x1, y1, padding), relax.TensorStructInfo(dtype="float32", ndim=0))
+    _check_inference(bb, relax.op.zazzle(x2, y1, padding), relax.TensorStructInfo(dtype="float32"))
+    _check_inference(bb, relax.op.zazzle(x1, y2, padding), relax.TensorStructInfo(dtype="float32", ndim=0))
+
+
+def test_zazzle_infer_struct_info_more_input_dtype():
+
 
 def test_linear():
     # Since linear is only a sugar for transpose + matmul + add,
